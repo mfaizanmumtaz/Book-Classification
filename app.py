@@ -6,6 +6,7 @@ from openpyxl.utils import get_column_letter
 from langchain.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 from openpyxl.styles import Alignment
+from collections import defaultdict
 from openpyxl import load_workbook
 import streamlit as st
 import pandas as pd
@@ -17,7 +18,7 @@ os.environ["LANGCHAIN_TRACING_V2"] = "true"
 os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
 os.environ["LANGCHAIN_PROJECT"] = "Books Classifications"
 
-OpenAI = ChatOpenAI(model="gpt-3.5-turbo-1106",temperature=0.4)
+OpenAI = ChatOpenAI(model="gpt-3.5-turbo-1106",temperature=0.4).with_fallbacks([ChatOpenAI(model="gpt-3.5-turbo-1106",temperature=0.4)])
 
 def pack_to_excel(response, excel_data):
     BooksNames = excel_data['Book'].values
@@ -75,6 +76,8 @@ def pack_to_excel(response, excel_data):
             worksheet.row_dimensions[cell.row].height = max_line_count * 15  
 
     workbook.save(output_file_path)
+    st.info("Output Data from the first some rows:")
+    st.dataframe(output_data[:5])
 
     st.download_button(
         label="Download Excel file",
@@ -83,26 +86,40 @@ def pack_to_excel(response, excel_data):
         mime="application/vnd.ms-excel"
     )
 
-SummaryPromptPrompt = PromptTemplate.from_template("""Please provide a summary of the section '{Section}' in chapter '{Chapter}' of the book '{Book}'. Highlight the key points and insights of this section in a concise manner.""")
+SummaryPromptPrompt = PromptTemplate.from_template("""Your task is to generate a summary for each section of the book '{Book}', specifically from chapter '{Chapter}'. These sections are delimited with ```. The sections belong to chapter '{Chapter}' of the book '{Book}'. Emphasize the key points and insights of each section. Present your output by starting with the chapter name as the title, followed by a concise introduction to the chapter, and then a summary of each section. For clarity, use the section names as titles for their respective summaries. Please ensure high-quality work as this is crucial to my career.
 
-SWEBOK_Area_CategoryChainChain = PromptTemplate.from_template("""For the book '{Book}', chapter '{Chapter}', and section '{Section}', please classify the content into the appropriate SWEBOK knowledge areas. Assess the content and determine which of the following knowledge areas it aligns with closely:
-Software Requirements
-Software Design
-Software Construction
-Software Testing
-Software Maintenance
-Software Configuration Management
-Software Engineering Management
-Software Engineering Process
-Software Engineering Models and Methods
-Software Quality
-Software Engineering Professional Practice
-Software Engineering Economics
-Computing Foundations
-Mathematical Foundations
-Engineering Foundations""")
+----------------
 
-Primary_SWEBOK_Area_PercentagePrompt = ChatPromptTemplate.from_template("""Please identify the SWEBOK knowledge areas that the book '{Book}', particularly chapter '{Chapter}', primarily focuses on. Additionally, determine the secondary SWEBOK areas associated with this chapter. Provide the percentage prominence for each of these primary and secondary areas, along with a justification for your assessment.""")
+Sections: ```{Sections}```""")
+
+SWEBOK_Area_CategoryChainChain = PromptTemplate.from_template("""Your task is to classify a particular book chapter section into the SWEBOK knowledge areas. For the book '{Book}', chapter '{Chapter}', and section '{Section}', please categorize the section into the most relevant SWEBOK knowledge areas.
+Analyze the SWEBOK knowledge areas and determine which of the following SWEBOK knowledge areas the section closely aligns with. The SWEBOK knowledge areas are delimited with ```.
+Output should only contain the SWEBOK knowledge areas, separated by commas.
+Providing extra output in your response can have adverse effects.
+Please do your best it is very important to my career.
+                                                              
+----------------
+                                                              
+```
+- Software Requirements
+- Software Design
+- Software Construction
+- Software Testing
+- Software Maintenance
+- Software Configuration Management
+- Software Engineering Management
+- Software Engineering Process
+- Software Engineering Models and Methods
+- Software Quality
+- Software Engineering Professional Practice
+- Software Engineering Economics
+- Computing Foundations
+- Mathematical Foundations
+- Engineering Foundations ```
+
+Your expertise in this classification is vital for the accurate categorization of this section.""")
+
+Primary_SWEBOK_Area_PercentagePrompt = ChatPromptTemplate.from_template("""Please identify the SWEBOK knowledge areas that the book '{Book}', particularly chapter '{Chapter}', primarily focuses on. Additionally, determine the secondary SWEBOK areas associated with this chapter. Provide the percentage prominence for each of these primary and secondary areas, along with a justification for your assessment.Please do your best it is very important to my career.""")
 
 SummaryPromptChain = SummaryPromptPrompt | OpenAI | StrOutputParser()
 SWEBOK_Area_CategoryChain = SWEBOK_Area_CategoryChainChain | OpenAI | StrOutputParser()
@@ -129,10 +146,23 @@ def chunking(data):
             }
             lst_data.append(data)
 
-    return lst_data
+    return lst_data[:200]
+
+def merge_sections(data):
+    merged_data = defaultdict(lambda: defaultdict(list))
+
+    for entry in data:
+        merged_data[entry['Book']][entry['Chapter']].append(entry['Section'])
+
+    list_of_dicts = [
+        {'Book': book, 'Chapter': chapter, 'Sections': "\n".join(sections)}
+        for book, chapters in merged_data.items()
+        for chapter, sections in chapters.items()
+    ]
+    return list_of_dicts
 
 main_chain = RunnableParallel(
-Summary = RunnablePassthrough() | SummaryPromptChain.map(),
+Summary = RunnablePassthrough() | merge_sections | SummaryPromptChain.map(),
 SWEBOK_Area_Category = RunnablePassthrough() | SWEBOK_Area_CategoryChain.map(),
 Primary_SWEBOK_Area_Percentage = RunnablePassthrough() | Primary_SWEBOK_Area_PercentageChain.map())
 
@@ -177,8 +207,8 @@ if st.button("Submit"):
                 pack_to_excel(st.session_state.response, excel_data)
 
             except Exception as e:
-                st.error("Something went wrong, please try again.")
+                st.error(f"Something went wrong, please try again. {e}")
 
         except Exception as e:
-            st.warning("Incorrect File Format! Please Make Sure Your Excel File Format Should Look Like This: ")
+            st.warning("Incorrect File Format! Please Make Sure Your Excel File Format Should Look Like This with 200 rows: ")
             st.dataframe(example_data)
