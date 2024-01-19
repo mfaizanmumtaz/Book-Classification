@@ -129,7 +129,7 @@ def chunking(data):
             }
             lst_data.append(data)
 
-    return lst_data[:1]
+    return lst_data
 
 main_chain = RunnableParallel(
 Summary = RunnablePassthrough() | SummaryPromptChain.map(),
