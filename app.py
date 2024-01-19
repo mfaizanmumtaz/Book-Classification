@@ -1,20 +1,92 @@
+from langchain.schema.runnable import RunnablePassthrough,RunnableParallel
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.schema.output_parser import StrOutputParser
 from langchain.prompts import ChatPromptTemplate
+from openpyxl.utils import get_column_letter
+from langchain.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
-from dotenv import load_dotenv
-from langchain.schema.runnable import RunnablePassthrough
+from openpyxl.styles import Alignment
+from openpyxl import load_workbook
+import streamlit as st
+import pandas as pd
 import os
+from dotenv import load_dotenv
 load_dotenv()
 
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
 os.environ["LANGCHAIN_PROJECT"] = "Books Classifications"
 
-OpenAI = ChatOpenAI(model="gpt-4",temperature=0)
-Google = ChatGoogleGenerativeAI(model="gemini-pro",temperature=0)
+OpenAI = ChatOpenAI(model="gpt-3.5-turbo-1106",temperature=0.4)
 
-SWEBOK_categories = """Software Requirements
+def pack_to_excel(response, excel_data):
+    BooksNames = excel_data['Book'].values
+
+    Summary = "\n\n".join(response["Summary"])
+    SWEBOK_Area_Category = "\n\n".join(response["SWEBOK_Area_Category"])
+    Primary_SWEBOK_Area_Percentage = response["Primary_SWEBOK_Area_Percentage"]
+
+    expanded_BookNames = []
+    expanded_Summary = []
+    expanded_SWEBOK_Area_Category = []
+    expanded_Primary_SWEBOK_Area_Percentage = []
+
+    for i, percentage in enumerate(Primary_SWEBOK_Area_Percentage):
+        expanded_BookNames.append(BooksNames[i % len(BooksNames)])
+        expanded_Summary.append(Summary)
+        expanded_SWEBOK_Area_Category.append(SWEBOK_Area_Category)
+        expanded_Primary_SWEBOK_Area_Percentage.append(percentage)
+
+    output_data = pd.DataFrame({
+        'BookNames': expanded_BookNames,
+        'Summary': expanded_Summary,
+        'SWEBOK_Area_Category': expanded_SWEBOK_Area_Category,
+        'Primary_SWEBOK_Area_Percentage': expanded_Primary_SWEBOK_Area_Percentage
+    })
+
+    output_file_path = 'output_data.xlsx'
+    output_data.to_excel(output_file_path, index=False)
+
+    workbook = load_workbook(output_file_path)
+    worksheet = workbook.active
+
+    for column in worksheet.columns:
+        max_length = 0
+        column_letter = get_column_letter(column[0].column)
+        for cell in column:
+            cell.alignment = Alignment(wrap_text=True)
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = (max_length + 2)
+        worksheet.column_dimensions[column_letter].width = adjusted_width
+
+        # Adjusting row heights based on content
+        for row in worksheet.iter_rows():
+            max_line_count = 1
+            for cell in row:
+                if cell.value:
+                    line_count = str(cell.value).count('\n') + 1
+                    if line_count > max_line_count:
+                        max_line_count = line_count
+            # Approximate adjustment, you might need to fine-tune the multiplication factor
+            worksheet.row_dimensions[cell.row].height = max_line_count * 15  
+
+    workbook.save(output_file_path)
+
+    st.download_button(
+        label="Download Excel file",
+        data=open(output_file_path, "rb"),
+        file_name="output_data.xlsx",
+        mime="application/vnd.ms-excel"
+    )
+
+SummaryPromptPrompt = PromptTemplate.from_template("""Please provide a summary of the section '{Section}' in chapter '{Chapter}' of the book '{Book}'. Highlight the key points and insights of this section in a concise manner.""")
+
+SWEBOK_Area_CategoryChainChain = PromptTemplate.from_template("""For the book '{Book}', chapter '{Chapter}', and section '{Section}', please classify the content into the appropriate SWEBOK knowledge areas. Assess the content and determine which of the following knowledge areas it aligns with closely:
+Software Requirements
 Software Design
 Software Construction
 Software Testing
@@ -28,85 +100,85 @@ Software Engineering Professional Practice
 Software Engineering Economics
 Computing Foundations
 Mathematical Foundations
-Engineering Foundations"""
+Engineering Foundations""")
 
-prompt = ChatPromptTemplate.from_messages(
-    [
-("user","""Your objective is to categorize chapters titles and sections into SWEBOK categories, identified by #### delimiters. Chapters titles and sections are demarcated by triple backticks.
+Primary_SWEBOK_Area_PercentagePrompt = ChatPromptTemplate.from_template("""Please identify the SWEBOK knowledge areas that the book '{Book}', particularly chapter '{Chapter}', primarily focuses on. Additionally, determine the secondary SWEBOK areas associated with this chapter. Provide the percentage prominence for each of these primary and secondary areas, along with a justification for your assessment.""")
 
-Ensure to adhere to the following instructions:
-- Thoroughly analyze each chapter title, section and SWEBOK categories before assigning a label, as accuracy is crucial for my career.
-- Avoid generating any additional text, as it may have adverse effects.
-- Provide your output in CSV format with only two columns; adding any extra columns may have adverse effects.
-Example format:
-"There Will Be Code",Software Construction
-"Bad Code",Software Quality
-"41. Pragmatic Teams",Software Engineering Management
+SummaryPromptChain = SummaryPromptPrompt | OpenAI | StrOutputParser()
+SWEBOK_Area_CategoryChain = SWEBOK_Area_CategoryChainChain | OpenAI | StrOutputParser()
+Primary_SWEBOK_Area_PercentageChain = Primary_SWEBOK_Area_PercentagePrompt | OpenAI | StrOutputParser()
 
-Please note, ensure to enclose the section or title in double quotes before assigning a label to it.
-  
-> SWEBOK Categories: ####\n{SWEBOK_categories} ####
+def chunking(data):
 
------------
+    lst_data = []
 
-> Titles and Sections: ```\n{Titles_and_Sections} ```
-""")])
+    current_book = None
+    current_chapter = None
 
-prompt = prompt.partial(SWEBOK_categories=SWEBOK_categories)
+    for inex,row in data.iterrows():
+        if row["Type"] == "Head":
+            current_book = row["Book"]
+            current_chapter = row["Titles"]
+            
+        elif row["Type"] == "Section" and current_book and current_chapter:
+            section = row['Titles']
+            data = {
+                "Book":current_book,
+                "Chapter":current_chapter,
+                "Section":section
+            }
+            lst_data.append(data)
 
-chain = prompt | Google | StrOutputParser()
+    return lst_data[:1]
 
-import pandas as pd
+main_chain = RunnableParallel(
+Summary = RunnablePassthrough() | SummaryPromptChain.map(),
+SWEBOK_Area_Category = RunnablePassthrough() | SWEBOK_Area_CategoryChain.map(),
+Primary_SWEBOK_Area_Percentage = RunnablePassthrough() | Primary_SWEBOK_Area_PercentageChain.map())
 
-def data():
+st.set_page_config(page_title="Books Classifications", page_icon=":books:", layout="wide")
 
-    Titles_and_Sections = []
+st.title("Books Classifications")
 
-    if any(file.endswith('.xlsx') for file in os.listdir('data')):
+example_data = {
+    'Book': ['Clean Code', 'Clean Code', 'Clean Code', 'Clean Code', 'Clean Code'],
+    'Titles': [
+        'Chapter 1: Clean Code',
+        'There Will Be Code',
+        'Bad Code',
+        'The Total Cost of Owning a Mess',
+        'The Grand Redesign in the Sky'
+    ],
+    'Chapter': ['Chapter 1', 'Chapter 1', 'Chapter 1', 'Chapter 1', 'Chapter 1'],
+    'Type': ['Head', 'Section', 'Section', 'Section', 'Section']
+}
 
-        for xlsx in os.listdir("data"):
-            df = pd.read_excel(os.path.join("data",xlsx))
 
-            if "chapter_section_titles" in df.columns:
-                print(f"Column was found with the name 'Titles_and_Sections' in the {xlsx} file.")
-                Titles_and_Sections.extend(df['chapter_section_titles'].tolist())
-                
-            else:
-                print(f"No column was found with the name 'Titles_and_Sections' in the {xlsx} file.")
-    else:
-        print("No Excel file found in Data Directory!")
+example_data = pd.DataFrame(example_data)
 
-    return Titles_and_Sections
-    
-def chunking(items):
+st.info("Please Make Sure Your Excel File Format Should Look Like This: ")
 
-    chunk_size = 30
+st.write(example_data)
 
-    return [{"Titles_and_Sections":"\n".join(items[i:i + chunk_size])} for i in range(0, len(items), chunk_size)]
+file_name = st.file_uploader("Upload your excel file", type=["xlsx"])
+if st.button("Submit"):
+    if file_name is not None:
+        excel_data = pd.read_excel(file_name)
 
-title_and_sections = RunnablePassthrough() | chunking | chain.map()
+        try:
+            data = chunking(excel_data)
 
-print("Please wait, it may take some time to finish")
-output = "\n".join(title_and_sections.invoke(data()))
+            try:
+                with st.spinner("Please wait while we process your data..."):
+                    st.session_state.response = main_chain.invoke(data)
 
-import pandas as pd
-import io
-import csv
+                st.success("Data Processed Successfully")
 
-csv_reader = csv.reader(io.StringIO(output))
-data = list(csv_reader)
-df = pd.DataFrame(data, columns=["Titles_and_Sections", "SWEBOK_categories"]).iloc[1:]
+                pack_to_excel(st.session_state.response, excel_data)
 
-xlsx_filename = "label_data.xlsx"
+            except Exception as e:
+                st.error("Something went wrong, please try again.")
 
-with pd.ExcelWriter(xlsx_filename, engine='xlsxwriter') as writer:
-    df.to_excel(writer, index=False, sheet_name='Sheet1')
-
-    workbook  = writer.book
-    worksheet = writer.sheets['Sheet1']
-
-    for i, col in enumerate(df.columns):
-        max_len = max(df[col].astype(str).apply(len).max(), len(col))
-        worksheet.set_column(i, i, max_len + 2)
-
-print(f"Excel file '{xlsx_filename}' created successfully.")
+        except Exception as e:
+            st.warning("Incorrect File Format! Please Make Sure Your Excel File Format Should Look Like This: ")
+            st.dataframe(example_data)
