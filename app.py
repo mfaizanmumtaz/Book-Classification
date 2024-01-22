@@ -1,104 +1,90 @@
 from langchain.schema.runnable import RunnablePassthrough,RunnableParallel
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.runnables import ConfigurableField
 from langchain.schema.output_parser import StrOutputParser
 from langchain.prompts import ChatPromptTemplate
-from openpyxl.utils import get_column_letter
 from langchain.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
-from openpyxl.styles import Alignment
 from collections import defaultdict
-from openpyxl import load_workbook
-import streamlit as st
-import pandas as pd
+import pandas as pd,streamlit as st
 import os
-from dotenv import load_dotenv
-load_dotenv()
+# from dotenv import load_dotenv
+# load_dotenv()
 
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
 os.environ["LANGCHAIN_PROJECT"] = "Books Classifications"
 
-OpenAI = ChatOpenAI(model="gpt-3.5-turbo-1106",temperature=0.4).with_fallbacks([ChatOpenAI(model="gpt-3.5-turbo-1106",temperature=0.4)])
+OpenAI = ChatOpenAI(model="gpt-4",temperature=0.2).configurable_fields(
+    temperature=ConfigurableField(
+        id="temperature",
+        name="LLM Temperature",
+        description="The temperature of the LLM model",
+    )
+).with_fallbacks([ChatOpenAI(model="gpt-3.5-turbo")])
 
 def pack_to_excel(response, excel_data):
-    BooksNames = excel_data['Book'].values
+    Chapter_Title = []
 
-    Summary = "\n\n".join(response["Summary"])
-    SWEBOK_Area_Category = "\n\n".join(response["SWEBOK_Area_Category"])
-    Primary_SWEBOK_Area_Percentage = response["Primary_SWEBOK_Area_Percentage"]
+    for index, entry in excel_data[:200].iterrows():
+        if entry["Type"] == "Head":
+            Chapter_Title.append(entry["Titles"])
 
-    expanded_BookNames = []
-    expanded_Summary = []
-    expanded_SWEBOK_Area_Category = []
-    expanded_Primary_SWEBOK_Area_Percentage = []
+    data = {
+        "Chapter_Title": Chapter_Title,
+        "Summary": response["Summary"],
+        "SWEBOK_Area_Category": response["SWEBOK_Area_Category"],
+        "Primary_SWEBOK_Area_Percentage": response["Primary_SWEBOK_Area_Percentage"]
+    }
+    
+    df = pd.DataFrame(data)
 
-    for i, percentage in enumerate(Primary_SWEBOK_Area_Percentage):
-        expanded_BookNames.append(BooksNames[i % len(BooksNames)])
-        expanded_Summary.append(Summary)
-        expanded_SWEBOK_Area_Category.append(SWEBOK_Area_Category)
-        expanded_Primary_SWEBOK_Area_Percentage.append(percentage)
-
-    output_data = pd.DataFrame({
-        'BookNames': expanded_BookNames,
-        'Summary': expanded_Summary,
-        'SWEBOK_Area_Category': expanded_SWEBOK_Area_Category,
-        'Primary_SWEBOK_Area_Percentage': expanded_Primary_SWEBOK_Area_Percentage
-    })
-
-    output_file_path = 'output_data.xlsx'
-    output_data.to_excel(output_file_path, index=False)
-
-    workbook = load_workbook(output_file_path)
-    worksheet = workbook.active
-
-    for column in worksheet.columns:
+    output_file_path = "output.xlsx"    
+    writer = pd.ExcelWriter(output_file_path, engine='openpyxl')
+    df.to_excel(writer, index=False)
+    
+    worksheet = writer.sheets['Sheet1']
+    
+    for col in worksheet.columns:
         max_length = 0
-        column_letter = get_column_letter(column[0].column)
-        for cell in column:
-            cell.alignment = Alignment(wrap_text=True)
-            try:
-                if len(str(cell.value)) > max_length:
-                    max_length = len(str(cell.value))
-            except:
-                pass
-        adjusted_width = (max_length + 2)
-        worksheet.column_dimensions[column_letter].width = adjusted_width
+        for cell in col:
+            if cell.value:
+                max_length = max(max_length, len(str(cell.value)))
+        adjusted_width = max_length + 2  # Adding a little extra space
+        worksheet.column_dimensions[col[0].column_letter].width = adjusted_width
 
-        # Adjusting row heights based on content
-        for row in worksheet.iter_rows():
-            max_line_count = 1
-            for cell in row:
-                if cell.value:
-                    line_count = str(cell.value).count('\n') + 1
-                    if line_count > max_line_count:
-                        max_line_count = line_count
-            # Approximate adjustment, you might need to fine-tune the multiplication factor
-            worksheet.row_dimensions[cell.row].height = max_line_count * 15  
+    writer.close()
 
-    workbook.save(output_file_path)
     st.info("Output Data from the first some rows:")
-    st.dataframe(output_data[:5])
+    st.dataframe(df)
 
     st.download_button(
         label="Download Excel file",
         data=open(output_file_path, "rb"),
         file_name="output_data.xlsx",
-        mime="application/vnd.ms-excel"
-    )
+        mime="application/vnd.ms-excel")
 
-SummaryPromptPrompt = PromptTemplate.from_template("""Your task is to generate a summary for each section of the book '{Book}', specifically from chapter '{Chapter}'. These sections are delimited with ```. The sections belong to chapter '{Chapter}' of the book '{Book}'. Emphasize the key points and insights of each section. Present your output by starting with the chapter name as the title, followed by a concise introduction to the chapter, and then a summary of each section. For clarity, use the section names as titles for their respective summaries. Please ensure high-quality work as this is crucial to my career.
+from utils import summary_few_short_examples
+
+SummaryPromptPrompt = ChatPromptTemplate.from_messages([("user",summary_few_short_examples[0]),("ai",summary_few_short_examples[1]),("user","""Your task is to generate a comprehensive summary for each section of the book '{Book}', specifically from chapter '{Chapter}'. These sections are delimited with ```. The sections belong to chapter '{Chapter}' of the book '{Book}'. Emphasize the key points and insights of each section. Present your output by starting with the chapter name as the title, followed by a concise introduction to the chapter, and then a summary of each section. For clarity, use the section names as titles for their respective summaries. Also, provide a justification for your assignment for each section summary. Please ensure high-quality work as this is crucial to my career.
 
 ----------------
 
-Sections: ```{Sections}```""")
+Sections: ```{Sections}```
 
-SWEBOK_Area_CategoryChainChain = PromptTemplate.from_template("""Your task is to classify a particular book chapter section into the SWEBOK knowledge areas. For the book '{Book}', chapter '{Chapter}', and section '{Section}', please categorize the section into the most relevant SWEBOK knowledge areas.
-Analyze the SWEBOK knowledge areas and determine which of the following SWEBOK knowledge areas the section closely aligns with. The SWEBOK knowledge areas are delimited with ```.
-Output should only contain the SWEBOK knowledge areas, separated by commas.
-Providing extra output in your response can have adverse effects.
+Also, justify your assignment for each section summary.""")])
+
+SWEBOK_Area_CategoryChain = PromptTemplate.from_template("""Your task is to classify a particular book chapter each section into SWEBOK knowledge areas. For the book '{Book}', chapter '{Chapter}', and sections delimited with XML tag, please classify each section into the most relevant SWEBOK knowledge areas and also provide your justification of each categorization.
+The SWEBOK knowledge areas are delimited with ```.
+Provide your output, including each section title along with the corresponding SWEBOK knowledge area, and provide justification. For example:
+1. Section Title: Data Abstraction
+   - SWEBOK Area Software Design
+   - Justification: This section delves into the concept of data abstraction and its significance in crafting clean code. It aligns with the principles of software design by emphasizing the encapsulation and interaction of data.
+
 Please do your best it is very important to my career.
                                                               
 ----------------
+                                                         
+<sections>: {Sections} </sections>                                                      
                                                               
 ```
 - Software Requirements
@@ -115,14 +101,14 @@ Please do your best it is very important to my career.
 - Software Engineering Economics
 - Computing Foundations
 - Mathematical Foundations
-- Engineering Foundations ```
+- Engineering Foundations```
 
-Your expertise in this classification is vital for the accurate categorization of this section.""")
+Your expertise is vital for accurately classifying each section into one or more SWEBOK areas, along with providing justification.""")
 
 Primary_SWEBOK_Area_PercentagePrompt = ChatPromptTemplate.from_template("""Please identify the SWEBOK knowledge areas that the book '{Book}', particularly chapter '{Chapter}', primarily focuses on. Additionally, determine the secondary SWEBOK areas associated with this chapter. Provide the percentage prominence for each of these primary and secondary areas, along with a justification for your assessment.Please do your best it is very important to my career.""")
 
 SummaryPromptChain = SummaryPromptPrompt | OpenAI | StrOutputParser()
-SWEBOK_Area_CategoryChain = SWEBOK_Area_CategoryChainChain | OpenAI | StrOutputParser()
+SWEBOK_Area_CategoryChain = SWEBOK_Area_CategoryChain | OpenAI | StrOutputParser()
 Primary_SWEBOK_Area_PercentageChain = Primary_SWEBOK_Area_PercentagePrompt | OpenAI | StrOutputParser()
 
 def chunking(data):
@@ -132,7 +118,7 @@ def chunking(data):
     current_book = None
     current_chapter = None
 
-    for inex,row in data.iterrows():
+    for index,row in data.iterrows():
         if row["Type"] == "Head":
             current_book = row["Book"]
             current_chapter = row["Titles"]
@@ -161,10 +147,22 @@ def merge_sections(data):
     ]
     return list_of_dicts
 
+def extract_chapter(data):
+    seen = set()
+    unique_data = []
+
+    for item in data:
+        identifier = (item["Book"],item["Chapter"])
+        if identifier not in seen:
+            seen.add(identifier)
+            unique_data.append(item)
+
+    return [{"Book":item["Book"],"Chapter":item["Chapter"]} for item in unique_data]
+
 main_chain = RunnableParallel(
-Summary = RunnablePassthrough() | merge_sections | SummaryPromptChain.map(),
-SWEBOK_Area_Category = RunnablePassthrough() | SWEBOK_Area_CategoryChain.map(),
-Primary_SWEBOK_Area_Percentage = RunnablePassthrough() | Primary_SWEBOK_Area_PercentageChain.map())
+Summary = RunnablePassthrough() | merge_sections | SummaryPromptChain.map().with_config(configurable={"temperature":0.8}),
+SWEBOK_Area_Category = RunnablePassthrough() | merge_sections | SWEBOK_Area_CategoryChain.map(),
+Primary_SWEBOK_Area_Percentage = RunnablePassthrough() | extract_chapter | Primary_SWEBOK_Area_PercentageChain.map())
 
 st.set_page_config(page_title="Books Classifications", page_icon=":books:", layout="wide")
 
