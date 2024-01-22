@@ -22,6 +22,8 @@ OpenAI = ChatOpenAI(model="gpt-4",temperature=0.2).configurable_fields(
     )
 ).with_fallbacks([ChatOpenAI(model="gpt-3.5-turbo")])
 
+import tempfile
+
 def pack_to_excel(response, excel_data):
     Chapter_Title = []
 
@@ -38,30 +40,32 @@ def pack_to_excel(response, excel_data):
     
     df = pd.DataFrame(data)
 
-    output_file_path = "output.xlsx"    
-    writer = pd.ExcelWriter(output_file_path, engine='openpyxl')
-    df.to_excel(writer, index=False)
-    
-    worksheet = writer.sheets['Sheet1']
-    
-    for col in worksheet.columns:
-        max_length = 0
-        for cell in col:
-            if cell.value:
-                max_length = max(max_length, len(str(cell.value)))
-        adjusted_width = max_length + 2  # Adding a little extra space
-        worksheet.column_dimensions[col[0].column_letter].width = adjusted_width
+    # Create a temporary Excel file
+    with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as temp_file:
+        temp_file_path = temp_file.name
+        writer = pd.ExcelWriter(temp_file_path, engine='openpyxl')
+        df.to_excel(writer, index=False)
+        
+        worksheet = writer.sheets['Sheet1']
+        
+        for col in worksheet.columns:
+            max_length = 0
+            for cell in col:
+                if cell.value:
+                    max_length = max(max_length, len(str(cell.value)))
+            adjusted_width = max_length + 2  # Adding a little extra space
+            worksheet.column_dimensions[col[0].column_letter].width = adjusted_width
 
-    writer.close()
+        writer.close()
 
-    st.info("Output Data from the first some rows:")
-    st.dataframe(df)
+        st.info("Output Data from the first some rows:")
+        st.dataframe(df)
 
-    st.download_button(
-        label="Download Excel file",
-        data=open(output_file_path, "rb"),
-        file_name="output_data.xlsx",
-        mime="application/vnd.ms-excel")
+        st.download_button(
+            label="Download Excel file",
+            data=open(temp_file_path, "rb"),
+            file_name="output_data.xlsx",
+            mime="application/vnd.ms-excel")
 
 from utils import summary_few_short_examples
 
