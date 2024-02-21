@@ -5,39 +5,24 @@ from langchain.prompts import ChatPromptTemplate
 from langchain.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 from collections import defaultdict
-import pandas as pd,streamlit as st
+import pandas as pd,os
+from pprint import pprint
+# from dotenv import load_dotenv
+# load_dotenv()
 
-st.set_page_config(page_title="Books Classifications", page_icon=":books:", layout="wide")
-# Get API key from user
-with st.sidebar:
-    openai_api_key = st.text_input("OpenAI API Key", key="chatbot_api_key", type="password")
-    "[Get an OpenAI API key](https://platform.openai.com/account/api-keys)"
-
-    if st.button('Save API Key'):
-        if not openai_api_key:
-            st.info("Please add your OpenAI API key to continue.")
-            st.stop()
-    
-        else:
-            st.session_state.api_key = openai_api_key
-            st.write("API key saved successfully!")
-
-def main():
-    api_key = st.session_state.api_key
-    OpenAI = ChatOpenAI(model="gpt-4",temperature=0.2,api_key=api_key).configurable_fields(
+def main(file_path,Example_Data):
+    OpenAI = ChatOpenAI(model="gpt-4",temperature=0.2).configurable_fields(
         temperature=ConfigurableField(
             id="temperature",
             name="LLM Temperature",
             description="The temperature of the LLM model",
         )
-    ).with_fallbacks([ChatOpenAI(model="gpt-3.5-turbo",api_key=api_key)])
-
-    import tempfile
+    ).with_fallbacks([ChatOpenAI(model="gpt-3.5-turbo")])
 
     def pack_to_excel(response, excel_data):
         Chapter_Title = []
-
-        for index, entry in excel_data[:200].iterrows():
+        
+        for index, entry in excel_data[:200].iterrows(): # Extracting titles from the data
             if entry["Type"] == "Head":
                 Chapter_Title.append(entry["Titles"])
 
@@ -49,9 +34,8 @@ def main():
         }
         
         df = pd.DataFrame(data)
-
         # Create a temporary Excel file
-        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as temp_file:
+        with open('output_data.xlsx', 'wb') as temp_file:
             temp_file_path = temp_file.name
             writer = pd.ExcelWriter(temp_file_path, engine='openpyxl')
             df.to_excel(writer, index=False)
@@ -68,14 +52,7 @@ def main():
 
             writer.close()
 
-            st.info("Output Data from the first some rows:")
-            st.dataframe(df)
-
-            st.download_button(
-                label="Download Excel file",
-                data=open(temp_file_path, "rb"),
-                file_name="output_data.xlsx",
-                mime="application/vnd.ms-excel")
+        print(f"Successfully created Excel file: {temp_file_path})")
 
     from utils import summary_few_short_examples
 
@@ -161,7 +138,7 @@ def main():
         ]
         return list_of_dicts
 
-    def extract_chapter(data):
+    def chapter_extractor(data):
         seen = set()
         unique_data = []
 
@@ -176,56 +153,61 @@ def main():
     main_chain = RunnableParallel(
     Summary = RunnablePassthrough() | merge_sections | SummaryPromptChain.map().with_config(configurable={"temperature":0.8}),
     SWEBOK_Area_Category = RunnablePassthrough() | merge_sections | SWEBOK_Area_CategoryChain.map(),
-    Primary_SWEBOK_Area_Percentage = RunnablePassthrough() | extract_chapter | Primary_SWEBOK_Area_PercentageChain.map())
+    Primary_SWEBOK_Area_Percentage = RunnablePassthrough() | chapter_extractor | Primary_SWEBOK_Area_PercentageChain.map())
 
-    st.title("Books Classifications")
+    excel_data = pd.read_excel(file_path)
+    try:
+        data = chunking(excel_data)
 
+        print("\nPlease wait while we process your data...\n")
+        try:
+            response = main_chain.invoke(data)
+            print("Data Processed Successfully\n")
+            pack_to_excel(response, excel_data)
+
+        except Exception as e:
+            pprint(f"Error: {e}")
+
+    except Exception as e:
+        print("\nIncorrect File Format!")
+        Example_Data()
+
+api_key = input("\nPlease Enter your OpenAI API Key: ")
+if api_key:
+    os.environ["OPENAI_API_KEY"] = api_key
+
+else:
+    print("Please enter your OpenAI API Key.")
+
+print(f"\nAvailable excel files in current directory: {[file for file in os.listdir() if file.endswith('.xlsx')]}")
+
+
+def Example_Data():
     example_data = {
-        'Book': ['Clean Code', 'Clean Code', 'Clean Code', 'Clean Code', 'Clean Code'],
-        'Titles': [
-            'Chapter 1: Clean Code',
-            'There Will Be Code',
-            'Bad Code',
-            'The Total Cost of Owning a Mess',
-            'The Grand Redesign in the Sky'
-        ],
-        'Chapter': ['Chapter 1', 'Chapter 1', 'Chapter 1', 'Chapter 1', 'Chapter 1'],
-        'Type': ['Head', 'Section', 'Section', 'Section', 'Section']
-    }
+            'Book': ['Clean Code', 'Clean Code', 'Clean Code', 'Clean Code', 'Clean Code'],
+            'Titles': [
+                'Chapter 1: Clean Code',
+                'There Will Be Code',
+                'Bad Code',
+                'The Total Cost of Owning a Mess',
+                'The Grand Redesign in the Sky'
+            ],
+            'Chapter': ['Chapter 1', 'Chapter 1', 'Chapter 1', 'Chapter 1', 'Chapter 1'],
+            'Type': ['Head', 'Section', 'Section', 'Section', 'Section']}
 
+    example_data = pd.DataFrame(example_data).head()
+    print("\nPlease Make Sure Your Excel File Format Should Look Like This maximum 200 rows:\n")
+    pprint(example_data)
 
-    example_data = pd.DataFrame(example_data)
+Example_Data()
 
-    st.info("Please Make Sure Your Excel File Format Should Look Like This: ")
+file_name = input("\nPlease Enter Your Excel File Name: ")
+if file_name not in os.listdir():
+    print("Error: File Not Found")
+    
+elif not file_name.endswith(".xlsx"):
+    print("Please enter only excel file path.")
 
-    st.write(example_data)
-
-    file_name = st.file_uploader("Upload your excel file", type=["xlsx"])
-    if st.button("Submit"):
-        if file_name is not None:
-            excel_data = pd.read_excel(file_name)
-
-            try:
-                data = chunking(excel_data)
-
-                try:
-                    with st.spinner("Please wait while we process your data..."):
-                        try:
-                            st.session_state.response = main_chain.invoke(data)
-                        except Exception as e:
-                            st.error(f"Error: {e}")
-                            st.stop()
-
-                    st.success("Data Processed Successfully")
-
-                    pack_to_excel(st.session_state.response, excel_data)
-
-                except Exception as e:
-                    st.error(f"Something went wrong, please try again. {e}")
-
-            except Exception as e:
-                st.warning("Incorrect File Format! Please Make Sure Your Excel File Format Should Look Like This with 200 rows: ")
-                st.dataframe(example_data)
-
-if 'api_key' in st.session_state:
-    main()
+else:
+    if __name__ == "__main__":
+        main(file_name,Example_Data)
